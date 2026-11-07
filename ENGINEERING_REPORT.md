@@ -241,3 +241,11 @@ If crackling remains, supply the actual WAV and the negotiated TalkAbility/debug
 encoding line; compare a lower speaker volume as a separate amplifier/clipping
 test. Source bit depth and sample rate alone cannot establish absence of clipping.
 No physical NVR/camera test was performed here.
+
+
+## Remaining hardware crackling investigation
+
+See [CRACKLING_INVESTIGATION.md](CRACKLING_INVESTIGATION.md) for the subsequent
+real GStreamer comparison, transport audit, opt-in diagnostics and one-variable
+Home Assistant playback matrix. This investigation retains the corrected encoder
+and existing playback defaults.
