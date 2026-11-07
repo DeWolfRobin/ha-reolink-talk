@@ -294,8 +294,9 @@ class ReolinkTalkPlayer(MediaPlayerEntity):
             pcm = await ffmpeg_to_pcm_s16le(
                 media_bytes,
                 sample_rate=ability.sample_rate,
-                volume=float(self._attr_volume_level or 1.0),
+                volume=float(self._attr_volume_level if self._attr_volume_level is not None else 1.0),
             )
+            _LOGGER.debug("Talk encoding channel=%s rate=%s pcm_bytes=%s block_bytes=%s", self._target.channel, ability.sample_rate, len(pcm), full_block_size)
             adpcm_bytes = ima_adpcm_encode_dvi_blocks(pcm, full_block_size=full_block_size)
 
             # 3) Send over Baichuan talk (cmd 201/202/11)

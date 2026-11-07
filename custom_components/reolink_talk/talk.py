@@ -297,7 +297,13 @@ async def ffmpeg_to_adpcm_wav(
         stderr=asyncio.subprocess.PIPE,
     )
     assert proc.stdin and proc.stdout
-    out, err = await proc.communicate(input_bytes)
+    try:
+        out, err = await proc.communicate(input_bytes)
+    except asyncio.CancelledError:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.communicate()
+        raise
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg failed: {err.decode('utf-8', 'ignore')}")
     return out
@@ -431,7 +437,13 @@ async def ffmpeg_to_pcm_s16le(
         stderr=asyncio.subprocess.PIPE,
     )
     assert proc.stdin and proc.stdout
-    out, err = await proc.communicate(input_bytes)
+    try:
+        out, err = await proc.communicate(input_bytes)
+    except asyncio.CancelledError:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.communicate()
+        raise
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg failed: {err.decode('utf-8', 'ignore')}")
     return out
@@ -799,12 +811,13 @@ async def talk_playback(
         else:
             raise
 
-    # `lengthPerEncoder` in TalkAbility is not consistently documented across
-    # models/firmware. In practice, the WAV `block_align` coming out of ffmpeg is
-    # the most reliable "bytes per ADPCM block" value for chunking and pacing.
-    full_block_size = int(block_align or ability.length_per_encoder)
+    # DVI blocks include a four-byte predictor header. Keep the caller
+    # supplied alignment; the PCM path does not produce an ADPCM WAV container.
+    full_block_size = int(block_align or (ability.length_per_encoder // 2 + 4))
     payloads = talk_binary_payload(adpcm_bytes, full_block_size, blocks_per_payload=4)
 
+    loop = asyncio.get_running_loop()
+    deadline = loop.time()
     try:
         for payload, blocks_in_payload in payloads:
             await send_talk_binary(bc, channel, payload, enc_type=enc_used)
@@ -813,7 +826,11 @@ async def talk_playback(
             adpcm_len = full_block_size * blocks_in_payload
             samples_sent = (adpcm_len - 4 * blocks_in_payload) * 2 + blocks_in_payload
             play_length = samples_sent / float(ability.sample_rate)
-            await asyncio.sleep(play_length)
+            deadline += play_length
+            lag = loop.time() - deadline
+            if lag > play_length:
+                _LOGGER.debug("Talk pacing behind by %.3fs on channel %s", lag, channel)
+            await asyncio.sleep(max(0.0, deadline - loop.time()))
     finally:
         try:
             await bc.send(cmd_id=11, channel=channel, enc_type=enc_used)
