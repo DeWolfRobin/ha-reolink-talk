@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from homeassistant.components.http import StaticPathConfig
@@ -26,28 +27,31 @@ async def _async_register_lovelace_resource(hass: HomeAssistant) -> None:
     contrast, are awaited before dashboards render, so registering there
     removes the race entirely.
     """
-    lovelace = hass.data.get("lovelace")
-    if lovelace is None:
-        return
-
-    resources = getattr(lovelace, "resources", None)
-    if resources is None:
-        return
-
-    try:
-        if not resources.loaded:
-            await resources.async_load()
-            resources.loaded = True
-    except Exception:  # storage-mode only; YAML dashboards manage their own
-        _LOGGER.debug("Lovelace resources unavailable, falling back to extra_js_url")
-        return
-
-    for item in resources.async_items():
-        if item.get("url", "").split("?")[0] == FRONTEND_URL:
-            return
-
-    await resources.async_create_item({"res_type": "module", "url": FRONTEND_URL})
-    _LOGGER.info("Registered Lovelace resource %s", FRONTEND_URL)
+    async with hass.data.setdefault(DOMAIN, {}).setdefault("resource_lock", asyncio.Lock()):
+        try:
+            lovelace = hass.data.get("lovelace")
+            resources = getattr(lovelace, "resources", None)
+            if resources is None:
+                _LOGGER.warning("Lovelace resources unavailable; manually add %s as a module resource", FRONTEND_URL)
+                return
+            if not resources.loaded:
+                await resources.async_load()
+                resources.loaded = True
+            for item in resources.async_items():
+                if item.get("url", "").split("?")[0] == FRONTEND_URL:
+                    return
+            create = getattr(resources, "async_create_item", None)
+            if create is None:
+                _LOGGER.warning(
+                    "YAML/read-only Lovelace resources: add to configuration.yaml: "
+                    "lovelace: {resources: [{url: '%s', type: module}]}", FRONTEND_URL,
+                )
+                return
+            await create({"res_type": "module", "url": FRONTEND_URL})
+            _LOGGER.info("Registered Lovelace resource %s", FRONTEND_URL)
+        except Exception as err:
+            # Frontend enhancement must never prevent media players loading.
+            _LOGGER.warning("Cannot register Lovelace resource (%s); manually add %s as a module resource", type(err).__name__, FRONTEND_URL)
 
 
 async def _async_register_frontend(hass: HomeAssistant) -> None:
@@ -57,6 +61,7 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
     claim the same static path.
     """
     if hass.data.setdefault(DOMAIN, {}).get("frontend_registered"):
+        await _async_register_lovelace_resource(hass)
         return
 
     await hass.http.async_register_static_paths(
@@ -70,6 +75,13 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
     )
     await _async_register_lovelace_resource(hass)
     hass.data[DOMAIN]["frontend_registered"] = True
+    if not hass.is_running:
+        from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+
+        async def register_when_started(_event):
+            await _async_register_lovelace_resource(hass)
+
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, register_when_started)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
