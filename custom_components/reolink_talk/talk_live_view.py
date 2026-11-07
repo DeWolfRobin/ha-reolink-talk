@@ -43,6 +43,7 @@ from .talk import (
     parse_talk_ability,
     send_talk_binary,
     talk_binary_payload,
+    talk_block_size,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -248,7 +249,7 @@ class ReolinkTalkLiveWebSocketView(HomeAssistantView):
                 await ws.close(code=4002, message=b"camera does not support adpcm talk")
                 return ws
 
-            full_block = (int(ability.length_per_encoder) // 2) + 4
+            full_block = talk_block_size(ability)
             payload_bytes = full_block - 4
             payload_samples = payload_bytes * 2
             samples_per_block = payload_samples + 1  # +1 implied header sample

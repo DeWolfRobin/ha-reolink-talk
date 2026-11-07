@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import shutil
 import struct
 import xml.etree.ElementTree as ET
@@ -37,6 +38,98 @@ class TalkAbility:
     sample_precision: int
     length_per_encoder: int
     sound_track: str
+
+
+@dataclass(frozen=True)
+class PlaybackOptions:
+    """Opt-in experiments; defaults preserve the established playback path."""
+
+    blocks_per_packet: int = 4
+    initial_buffer_ms: int = 0
+    pacing_factor: float = 1.0
+    pacing_mode: str = "deadline"
+    final_drain_ms: int = 0
+    wait_for_ack: bool = True
+    logging: bool = False
+    attenuation_db: float = 0.0
+
+    def __post_init__(self):
+        if not 1 <= self.blocks_per_packet <= 16:
+            raise ValueError("blocks_per_packet must be 1..16")
+        if (
+            not 0 <= self.initial_buffer_ms <= 500
+            or not 0 <= self.final_drain_ms <= 2000
+        ):
+            raise ValueError("buffer/drain out of range")
+        if (
+            not math.isfinite(self.pacing_factor)
+            or not 0.9 <= self.pacing_factor <= 1.1
+        ):
+            raise ValueError("pacing_factor must be .9..1.1")
+        if self.pacing_mode not in ("deadline", "interval"):
+            raise ValueError("unknown pacing mode")
+        if (
+            not math.isfinite(self.attenuation_db)
+            or not -18 <= self.attenuation_db <= 0
+        ):
+            raise ValueError("attenuation_db must be -18..0")
+
+    @classmethod
+    def from_options(cls, options):
+        return cls(
+            **{
+                key: options.get(f"diagnostic_{key}", field.default)
+                for key, field in cls.__dataclass_fields__.items()
+            }
+        )
+
+
+def talk_block_size(ability: TalkAbility) -> int:
+    """Negotiated payload is lengthPerEncoder/2 bytes, plus 4 state bytes."""
+    length = ability.length_per_encoder
+    if length < 8 or length % 2 or ability.sample_rate <= 0:
+        raise ValueError("Invalid negotiated ADPCM length/sample rate")
+    if ability.sample_precision != 16 or ability.sound_track.lower() != "mono":
+        raise ValueError("Only mono PCM16 talk is supported")
+    return length // 2 + 4
+
+
+def pcm_levels(pcm: bytes) -> dict[str, float | int]:
+    """Measure post-FFmpeg PCM; rail hits suggest clipping but do not prove it."""
+    if len(pcm) % 2:
+        raise ValueError("PCM length must be even")
+    count = len(pcm) // 2
+    peak = rails = 0
+    energy = 0
+    for (sample,) in struct.iter_unpack("<h", pcm):
+        peak = max(peak, abs(sample))
+        energy += sample * sample
+        rails += sample in (-32768, 32767)
+    return {
+        "samples": count,
+        "peak": peak,
+        "rail_samples": rails,
+        "peak_dbfs": 20 * math.log10(peak / 32768) if peak else -math.inf,
+        "rms_dbfs": 10 * math.log10(energy / count / 32768**2) if energy else -math.inf,
+    }
+
+
+def transport_backlog(bc):
+    """Host buffers only; these values cannot measure the NVR speaker buffer."""
+    connection = getattr(bc, "_connection", None)
+    transport = getattr(connection, "_transport", None)
+    size = None
+    reader = getattr(transport, "get_write_buffer_size", None)
+    if reader is not None:
+        try:
+            size = reader()
+        except (AttributeError, NotImplementedError):
+            pass
+    return {
+        "write_buffer_bytes": size,
+        "udp_queued": len(getattr(connection, "_send_queue", ())),
+        "udp_unacked": len(getattr(connection, "_send_packets", ())),
+    }
 
 
 def _first_text(root: ET.Element, path: str) -> str | None:
@@ -222,15 +315,16 @@ def bcmedia_adpcm_packet(block: bytes) -> bytes:
 def talk_binary_payload(
     adpcm_bytes: bytes, full_block_size: int, blocks_per_payload: int = 4
 ) -> list[tuple[bytes, int]]:
+    if full_block_size < 8 or blocks_per_payload < 1:
+        raise ValueError("Invalid ADPCM packet dimensions")
+    if len(adpcm_bytes) % full_block_size:
+        raise ValueError("Incomplete ADPCM block; refusing to truncate audio")
     # Returns list of (binary_payload, blocks_in_payload).
     out: list[tuple[bytes, int]] = []
     blocks = [
         adpcm_bytes[i : i + full_block_size]
         for i in range(0, len(adpcm_bytes), full_block_size)
     ]
-    # Drop incomplete trailing block (if any)
-    if blocks and len(blocks[-1]) != full_block_size:
-        blocks = blocks[:-1]
     for i in range(0, len(blocks), blocks_per_payload):
         group = blocks[i : i + blocks_per_payload]
         payload = b"".join(bcmedia_adpcm_packet(b) for b in group)
@@ -269,59 +363,6 @@ async def fetch_bytes(hass: HomeAssistant, url: str) -> bytes:
     async with session.get(fetch_url, allow_redirects=True) as resp:
         resp.raise_for_status()
         return await resp.read()
-
-
-async def ffmpeg_to_adpcm_wav(
-    input_bytes: bytes,
-    sample_rate: int,
-    length_per_encoder: int,
-    *,
-    volume: float = 1.0,
-) -> bytes:
-    # Convert arbitrary audio to ADPCM IMA WAV with a predictable block layout.
-    # `length_per_encoder` comes from TalkAbility (typically 1024).
-    ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
-    cmd = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        "pipe:0",
-        # Volume is applied in software. This provides a consistent UX even if a
-        # camera model does not support hardware "speak volume" control.
-        "-af",
-        f"volume={max(0.0, float(volume))}",
-        "-ac",
-        "1",
-        "-ar",
-        str(sample_rate),
-        "-c:a",
-        "adpcm_ima_wav",
-        "-block_size",
-        str(length_per_encoder),
-        "-f",
-        "wav",
-        "pipe:1",
-    ]
-
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    assert proc.stdin and proc.stdout
-    try:
-        out, err = await proc.communicate(input_bytes)
-    except asyncio.CancelledError:
-        if proc.returncode is None:
-            proc.kill()
-        await proc.communicate()
-        raise
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed: {err.decode('utf-8', 'ignore')}")
-    return out
 
 
 # IMA/DVI ADPCM encoder tables (standard IMA ADPCM).
@@ -618,9 +659,10 @@ async def send_talk_binary(
     *,
     mess_id: int | None = None,
     enc_type=None,
+    wait_for_ack: bool = True,
 ) -> None:
     # Like reolink_aio Baichuan.send(), but:
-    # - doesn't wait for a response
+    # - optionally waits for a command response (default), not audio completion
     # - encrypts only the Extension XML
     # - appends the BcMedia binary payload unencrypted
     from reolink_aio.baichuan import util as bc_util
@@ -685,23 +727,18 @@ async def send_talk_binary(
     )
 
     packet = header + enc_ext + binary_payload
-    if _LOGGER.isEnabledFor(logging.DEBUG):
-        _LOGGER.debug(
-            "TalkBinary %s: ch=%s mess_id=%s enc=%s enc_ext=%s payload=%s mess_len=%s payload_offset=%s",
-            getattr(bc, "_host", "?"),
-            channel,
-            getattr(bc, "_mess_id", "?"),
-            getattr(enc_type, "value", str(enc_type)),
-            len(enc_ext),
-            len(binary_payload),
-            mess_len,
-            payload_offset,
-        )
-
     # Modern reolink-aio owns response routing and UDP/TCP transport details.
     # Its connection.send propagates rejected packets and cleans pending futures.
     await bc._connect_if_needed()
     full_mess_id = int.from_bytes(header[12:16], "little")
+    if not wait_for_ack:
+        sender = getattr(bc._connection, "send_without_wait", None)
+        if sender is None:
+            raise RuntimeError(
+                "Nonblocking diagnostic requires connection.send_without_wait"
+            )
+        await sender(packet, cmd_id=cmd_id)
+        return
     sender = getattr(bc._connection, "send", None)
     if sender is not None:
         await sender(packet, cmd_id, full_mess_id, channel)
@@ -710,6 +747,11 @@ async def send_talk_binary(
     proto = getattr(bc, "_protocol", None)
     loop = getattr(bc, "_loop", None)
     if proto is None or loop is None:
+        if not getattr(bc, "_talk_ack_warning_logged", False):
+            _LOGGER.warning(
+                "Talk transport has no command-response API; packet acceptance cannot be confirmed"
+            )
+            bc._talk_ack_warning_logged = True
         async with bc._login_mutex:
             bc._connection._transport.write(packet)
         return
@@ -741,6 +783,7 @@ async def talk_playback(
     ability: TalkAbility,
     *,
     block_align: int | None = None,
+    options: PlaybackOptions | None = None,
 ) -> None:
     from reolink_aio.exceptions import ApiError
     from reolink_aio.baichuan import util as bc_util
@@ -757,6 +800,14 @@ async def talk_playback(
                     continue
                 raise
         return bc_util.EncType.BC
+
+    options = options or PlaybackOptions()
+    full_block_size = talk_block_size(ability)
+    if block_align is not None and block_align != full_block_size:
+        raise ValueError("ADPCM block alignment disagrees with TalkAbility")
+    payloads = talk_binary_payload(
+        adpcm_bytes, full_block_size, options.blocks_per_packet
+    )
 
     enc_used = None
     last_err = None
@@ -779,27 +830,114 @@ async def talk_playback(
             f"Device rejected talk configuration on channel {channel}"
         ) from last_err
 
-    # DVI blocks include a four-byte predictor header. Keep the caller
-    # supplied alignment; the PCM path does not produce an ADPCM WAV container.
-    full_block_size = int(block_align or (ability.length_per_encoder // 2 + 4))
-    payloads = talk_binary_payload(adpcm_bytes, full_block_size, blocks_per_payload=4)
-
     loop = asyncio.get_running_loop()
-    deadline = loop.time()
+    started = deadline = loop.time()
+    audio_seconds = 0.0
+    lead = options.initial_buffer_ms / 1000
+    lead_remaining = lead
+    due = started
+    previous_send = None
+    count = logged = late_count = 0
+    max_late = max_wait = max_gap = sum_wait = 0.0
+    if options.logging:
+        from importlib.metadata import version
+
+        _LOGGER.debug(
+            "Talk API reolink-aio=%s response_path=%s",
+            version("reolink-aio"),
+            "connection.send"
+            if hasattr(getattr(bc, "_connection", None), "send")
+            else "legacy",
+        )
+        _LOGGER.debug(
+            "Talk experiment ch=%s length=%s block=%s samples_per_block=%s rate=%s options=%s transport=%s",
+            channel,
+            ability.length_per_encoder,
+            full_block_size,
+            (full_block_size - 4) * 2 + 1,
+            ability.sample_rate,
+            options,
+            type(getattr(bc, "_connection", None)).__name__,
+        )
     try:
         for payload, blocks_in_payload in payloads:
-            await send_talk_binary(bc, channel, payload, enc_type=enc_used)
-
-            # Pace like neolink: sleep for the playback time of the data we just sent.
-            adpcm_len = full_block_size * blocks_in_payload
-            samples_sent = (adpcm_len - 4 * blocks_in_payload) * 2 + blocks_in_payload
-            play_length = samples_sent / float(ability.sample_rate)
-            deadline += play_length
-            lag = loop.time() - deadline
-            if lag > play_length:
-                _LOGGER.debug("Talk pacing behind by %.3fs on channel %s", lag, channel)
-            await asyncio.sleep(max(0.0, deadline - loop.time()))
+            sent_at = loop.time()
+            lateness = max(0.0, sent_at - due)
+            gap = sent_at - previous_send if previous_send is not None else 0.0
+            previous_send = sent_at
+            if options.wait_for_ack:
+                await send_talk_binary(bc, channel, payload, enc_type=enc_used)
+            else:
+                await send_talk_binary(
+                    bc, channel, payload, enc_type=enc_used, wait_for_ack=False
+                )
+            send_wait = loop.time() - sent_at
+            samples_sent = ((full_block_size - 4) * 2 + 1) * blocks_in_payload
+            play_length = samples_sent / ability.sample_rate
+            audio_seconds += play_length
+            count += 1
+            late_count += lateness > 0.005
+            max_late = max(max_late, lateness)
+            max_wait = max(max_wait, send_wait)
+            max_gap = max(max_gap, gap)
+            sum_wait += send_wait
+            if (
+                options.logging
+                and logged < 20
+                and (
+                    count <= 5
+                    or count % 50 == 0
+                    or send_wait > play_length
+                    or lateness > 0.005
+                )
+            ):
+                _LOGGER.debug(
+                    "Talk packet ch=%s n=%s blocks=%s audio_ms=%.3f schedule_late_ms=%.3f send_wait_ms=%.3f gap_ms=%.3f ack_requested=%s host_backlog=%s",
+                    channel,
+                    count,
+                    blocks_in_payload,
+                    play_length * 1000,
+                    lateness * 1000,
+                    send_wait * 1000,
+                    gap * 1000,
+                    options.wait_for_ack,
+                    transport_backlog(bc),
+                )
+                logged += 1
+            if options.pacing_mode == "interval":
+                # Reference Neolink talk_stream sleeps AFTER sending; its send
+                # queues a message and does not await a cmd 202 response.
+                interval = play_length * options.pacing_factor
+                skip = min(lead_remaining, interval)
+                lead_remaining -= skip
+                deadline = loop.time() + interval - skip
+                due = deadline
+            else:
+                deadline += play_length * options.pacing_factor
+                due = max(started, deadline - lead)
+            await asyncio.sleep(max(0.0, due - loop.time()))
+        # Return any deliberate startup lead/faster pacing before stopping.
+        # A command response is not evidence that the speaker has drained.
+        if lead or options.pacing_factor < 1:
+            await asyncio.sleep(max(0.0, started + audio_seconds - loop.time()))
+        if options.final_drain_ms:
+            await asyncio.sleep(options.final_drain_ms / 1000)
     finally:
+        if options.logging:
+            _LOGGER.debug(
+                "Talk summary ch=%s packets=%s audio_s=%.3f elapsed_s=%.3f late_over_5ms=%s max_late_ms=%.3f mean_send_wait_ms=%.3f max_send_wait_ms=%.3f max_gap_ms=%.3f ack_requested=%s host_backlog=%s",
+                channel,
+                count,
+                audio_seconds,
+                loop.time() - started,
+                late_count,
+                max_late * 1000,
+                sum_wait * 1000 / max(count, 1),
+                max_wait * 1000,
+                max_gap * 1000,
+                options.wait_for_ack,
+                transport_backlog(bc),
+            )
         try:
             await bc.send(cmd_id=11, channel=channel, enc_type=enc_used)
         except Exception as err:

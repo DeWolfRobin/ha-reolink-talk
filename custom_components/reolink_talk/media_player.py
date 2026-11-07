@@ -23,6 +23,9 @@ from .const import (
     DOMAIN,
 )
 from .talk import (
+    PlaybackOptions,
+    pcm_levels,
+    talk_block_size,
     claim_talk_session,
     ffmpeg_to_pcm_s16le,
     fetch_bytes,
@@ -45,6 +48,7 @@ class ReolinkTarget:
     title: str
     channel: int
     verify_ssl: bool = True
+    playback_options: PlaybackOptions = PlaybackOptions()
 
 
 async def async_setup_entry(
@@ -117,6 +121,7 @@ async def async_setup_entry(
             target = ReolinkTarget(
                 title=re_entry.title,
                 channel=ch,
+                playback_options=PlaybackOptions.from_options(entry.options),
                 **base_kwargs,
             )
             mp_name = f"Reolink Talk {cam_name}"
@@ -352,8 +357,24 @@ class ReolinkTalkPlayer(MediaPlayerEntity):
             # Neolink expects ADPCM in "DVI-4" block layout with:
             # full_block_size = (lengthPerEncoder / 2) + 4
             #
-            # This is NOT the same as WAV ADPCM block_align.
-            full_block_size = (int(ability.length_per_encoder) // 2) + 4
+            # Physical bytes per block, not the advertised lengthPerEncoder.
+            full_block_size = talk_block_size(ability)
+            options = self._target.playback_options
+            if options.logging:
+                try:
+                    async with asyncio.timeout(3):
+                        await bc.GetAudioCfg(self._target.channel)
+                    _LOGGER.debug(
+                        "Talk physical speak volume ch=%s value=%s (0..100; None means unavailable)",
+                        self._target.channel,
+                        host.volume_speak(self._target.channel),
+                    )
+                except Exception as err:
+                    _LOGGER.debug(
+                        "Talk physical speak volume unavailable ch=%s (%s)",
+                        self._target.channel,
+                        type(err).__name__,
+                    )
             pcm = await ffmpeg_to_pcm_s16le(
                 media_bytes,
                 sample_rate=ability.sample_rate,
@@ -361,8 +382,18 @@ class ReolinkTalkPlayer(MediaPlayerEntity):
                     self._attr_volume_level
                     if self._attr_volume_level is not None
                     else 1.0
-                ),
+                )
+                * 10 ** (options.attenuation_db / 20),
             )
+            if options.logging:
+                levels = await self.hass.async_add_executor_job(pcm_levels, pcm)
+                _LOGGER.debug(
+                    "Talk PCM ch=%s levels=%s software_volume=%s diagnostic_gain_db=%s; physical speaker volume is independent",
+                    self._target.channel,
+                    levels,
+                    self._attr_volume_level,
+                    options.attenuation_db,
+                )
             _LOGGER.debug(
                 "Talk encoding channel=%s rate=%s pcm_bytes=%s block_bytes=%s",
                 self._target.channel,
@@ -383,6 +414,7 @@ class ReolinkTalkPlayer(MediaPlayerEntity):
                 adpcm_bytes,
                 ability,
                 block_align=full_block_size,
+                options=options,
             )
         finally:
             try:

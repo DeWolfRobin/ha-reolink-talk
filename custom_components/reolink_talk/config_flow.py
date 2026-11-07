@@ -14,6 +14,8 @@ from .const import (
     DOMAIN,
 )
 
+from .talk import PlaybackOptions
+
 
 class ReolinkTalkConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
@@ -40,8 +42,14 @@ class ReolinkTalkOptionsFlowHandler(config_entries.OptionsFlow):
         reolink_entries = hass.config_entries.async_entries("reolink")
         entry_map = {e.entry_id: e.title for e in reolink_entries}
 
+        errors = {}
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            try:
+                PlaybackOptions.from_options(user_input)
+            except (ValueError, TypeError):
+                errors["base"] = "invalid_diagnostics"
+            else:
+                return self.async_create_entry(title="", data=user_input)
 
         schema = vol.Schema(
             {
@@ -73,4 +81,26 @@ class ReolinkTalkOptionsFlowHandler(config_entries.OptionsFlow):
             }
         )
 
-        return self.async_show_form(step_id="init", data_schema=schema)
+        # File-playback diagnostics only. Defaults intentionally preserve behavior.
+        validators = {
+            "blocks_per_packet": vol.All(vol.Coerce(int), vol.Range(min=1, max=16)),
+            "initial_buffer_ms": vol.All(vol.Coerce(int), vol.Range(min=0, max=500)),
+            "pacing_factor": vol.All(vol.Coerce(float), vol.Range(min=0.9, max=1.1)),
+            "pacing_mode": vol.In(["deadline", "interval"]),
+            "final_drain_ms": vol.All(vol.Coerce(int), vol.Range(min=0, max=2000)),
+            "wait_for_ack": bool,
+            "logging": bool,
+            "attenuation_db": vol.All(vol.Coerce(float), vol.Range(min=-18, max=0)),
+        }
+        schema = schema.extend(
+            {
+                vol.Optional(
+                    f"diagnostic_{key}",
+                    default=self._config_entry.options.get(
+                        f"diagnostic_{key}", field.default
+                    ),
+                ): validators[key]
+                for key, field in PlaybackOptions.__dataclass_fields__.items()
+            }
+        )
+        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)

@@ -14,13 +14,24 @@
     "step": {
       "init": {
         "title": "Reolink Talk options",
-        "description": "Disabling certificate verification reduces connection security. Applies to device HTTP connections; live talk uses the official Reolink connection.",
+        "description": "Disabling certificate verification reduces connection security. Applies to device HTTP connections; live talk uses the official Reolink connection. Playback diagnostics apply only to files. Change one parameter at a time. Disabling command-response waits removes confirmation of packet acceptance. Initial buffering is a send-ahead budget, not a guaranteed device buffer.",
         "data": {
           "verify_ssl": "Verify SSL certificates",
           "channel": "Fallback channel",
-          "reolink_entry_ids": "Reolink integrations"
+          "reolink_entry_ids": "Reolink integrations",
+          "diagnostic_blocks_per_packet": "Diagnostic: blocks per packet (default 4)",
+          "diagnostic_initial_buffer_ms": "Diagnostic: initial send-ahead budget, ms (default 0)",
+          "diagnostic_pacing_factor": "Diagnostic: pacing multiplier (default 1.0)",
+          "diagnostic_pacing_mode": "Diagnostic: pacing mode (deadline or interval)",
+          "diagnostic_final_drain_ms": "Diagnostic: extra final drain, ms (default 0)",
+          "diagnostic_wait_for_ack": "Diagnostic: wait for command responses (default on)",
+          "diagnostic_logging": "Diagnostic: bounded timing and PCM logging",
+          "diagnostic_attenuation_db": "Diagnostic: software attenuation, dB (default 0)"
         }
       }
+    },
+    "error": {
+      "invalid_diagnostics": "Playback diagnostic values must be finite and within the displayed ranges."
     }
   }
 }
