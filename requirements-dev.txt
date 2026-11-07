@@ -1,0 +1,4 @@
+reolink-aio>=0.21.8
+ruff
+cryptography
+imageio-ffmpeg

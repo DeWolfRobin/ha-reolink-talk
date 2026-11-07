@@ -19,6 +19,7 @@ single-use token is issued over Home Assistant's *authenticated* WebSocket API
 (`reolink_talk/get_token`) and must be presented as a query parameter when
 opening the audio socket. An unauthenticated caller has no way to obtain one.
 """
+
 from __future__ import annotations
 
 import logging
@@ -73,7 +74,9 @@ def _issue_token(hass: HomeAssistant, camera_slug: str) -> str:
     return token
 
 
-def _consume_token(hass: HomeAssistant, token: str | None, camera_slug: str | None) -> bool:
+def _consume_token(
+    hass: HomeAssistant, token: str | None, camera_slug: str | None
+) -> bool:
     """Validate and burn a token. Returns True only for a live, matching token."""
     if not token or not camera_slug:
         return False
@@ -100,7 +103,9 @@ def _iter_camera_slugs(hass: HomeAssistant):
     """
     reolink_entry_ids = hass.data.get(DOMAIN, {}).get("reolink_entry_ids")
     if not reolink_entry_ids:
-        reolink_entry_ids = [e.entry_id for e in hass.config_entries.async_entries("reolink")]
+        reolink_entry_ids = [
+            e.entry_id for e in hass.config_entries.async_entries("reolink")
+        ]
 
     for entry_id in reolink_entry_ids:
         entry: ConfigEntry | None = hass.config_entries.async_get_entry(entry_id)
@@ -121,7 +126,9 @@ def _iter_camera_slugs(hass: HomeAssistant):
             yield slugify(name), ch, entry
 
 
-def _resolve_camera(hass: HomeAssistant, camera_query: str) -> tuple[ConfigEntry, int] | None:
+def _resolve_camera(
+    hass: HomeAssistant, camera_query: str
+) -> tuple[ConfigEntry, int] | None:
     for slug, ch, entry in _iter_camera_slugs(hass):
         if slug == camera_query:
             return entry, ch
@@ -135,7 +142,9 @@ def _resolve_camera(hass: HomeAssistant, camera_query: str) -> tuple[ConfigEntry
     }
 )
 @callback
-def ws_get_token(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+def ws_get_token(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
     """Issue a short-lived token for opening the live-talk audio socket.
 
     This runs on Home Assistant's authenticated WebSocket API, so only a
@@ -190,8 +199,14 @@ class ReolinkTalkLiveWebSocketView(HomeAssistantView):
         resolved = _resolve_camera(hass, camera)
         if resolved is None:
             available = sorted({slug for slug, _ch, _e in _iter_camera_slugs(hass)})
-            hint = ", ".join(available) if available else "none discovered yet (is the Reolink integration loaded?)"
-            _LOGGER.error("Live talk: unknown/missing camera=%r. Available: %s", camera, hint)
+            hint = (
+                ", ".join(available)
+                if available
+                else "none discovered yet (is the Reolink integration loaded?)"
+            )
+            _LOGGER.error(
+                "Live talk: unknown/missing camera=%r. Available: %s", camera, hint
+            )
             await ws.close(
                 code=4000,
                 message=f"unknown camera {camera!r}. Available: {hint}".encode(),
@@ -225,7 +240,11 @@ class ReolinkTalkLiveWebSocketView(HomeAssistantView):
             ability_xml = await bc.send(cmd_id=10, channel=channel)
             ability = parse_talk_ability(ability_xml)
             if ability.audio_type.lower() != "adpcm":
-                _LOGGER.error("Camera ch=%s does not support ADPCM talk (got %s)", channel, ability.audio_type)
+                _LOGGER.error(
+                    "Camera ch=%s does not support ADPCM talk (got %s)",
+                    channel,
+                    ability.audio_type,
+                )
                 await ws.close(code=4002, message=b"camera does not support adpcm talk")
                 return ws
 
@@ -237,7 +256,11 @@ class ReolinkTalkLiveWebSocketView(HomeAssistantView):
 
             _LOGGER.info(
                 "TalkAbility ch=%s sampleRate=%s lengthPerEncoder=%s full_block=%s pcm_bytes_per_block=%s",
-                channel, ability.sample_rate, ability.length_per_encoder, full_block, bytes_per_block_pcm,
+                channel,
+                ability.sample_rate,
+                ability.length_per_encoder,
+                full_block,
+                bytes_per_block_pcm,
             )
 
             # Start talk session -- same TalkConfig send/fallback dance as
@@ -247,7 +270,9 @@ class ReolinkTalkLiveWebSocketView(HomeAssistantView):
             for cfg_xml in build_talk_config_variants(channel, ability):
                 for enc in (bc_util.EncType.AES, bc_util.EncType.BC):
                     try:
-                        await bc.send(cmd_id=201, channel=channel, body=cfg_xml, enc_type=enc)
+                        await bc.send(
+                            cmd_id=201, channel=channel, body=cfg_xml, enc_type=enc
+                        )
                         enc_used = enc
                         last_err = None
                         break
@@ -255,19 +280,33 @@ class ReolinkTalkLiveWebSocketView(HomeAssistantView):
                         last_err = err
                         rsp = getattr(err, "rspCode", None)
                         if rsp in (421, 422):
-                            _LOGGER.warning("Device busy/rejected talk on channel %s (status %s)", channel, rsp)
-                            await ws.close(code=4003, message=b"device busy; try sequential playback")
+                            _LOGGER.warning(
+                                "Device busy/rejected talk on channel %s (status %s)",
+                                channel,
+                                rsp,
+                            )
+                            await ws.close(
+                                code=4003,
+                                message=b"device busy; try sequential playback",
+                            )
                             return ws
                         continue
                 if enc_used is not None:
                     break
 
             if enc_used is None:
-                _LOGGER.error("Live talk: TalkConfig rejected for ch=%s (%s)", channel, last_err)
+                _LOGGER.error(
+                    "Live talk: TalkConfig rejected for ch=%s (%s)", channel, last_err
+                )
                 await ws.close(code=4003, message=b"camera rejected talk config")
                 return ws
 
-            _LOGGER.info("Live talk session started: camera=%s channel=%s enc=%s", camera, channel, enc_used.value)
+            _LOGGER.info(
+                "Live talk session started: camera=%s channel=%s enc=%s",
+                camera,
+                channel,
+                enc_used.value,
+            )
             await ws.send_json({"status": "ready", "sampleRate": ability.sample_rate})
 
             encoder = LiveAdpcmEncoder(full_block)
@@ -287,12 +326,18 @@ class ReolinkTalkLiveWebSocketView(HomeAssistantView):
                         next_report = now + 5.0
                         _LOGGER.debug(
                             "Live talk pacing: camera=%s audio=%.2fs wall=%.2fs ratio=%.3f",
-                            camera, pcm_bytes_in / 2 / rate, now - t0,
+                            camera,
+                            pcm_bytes_in / 2 / rate,
+                            now - t0,
                             (pcm_bytes_in / 2 / rate) / max(now - t0, 1e-6),
                         )
                     for adpcm_block in encoder.feed(msg.data):
-                        for payload, _n in talk_binary_payload(adpcm_block, full_block, blocks_per_payload=1):
-                            await send_talk_binary(bc, channel, payload, enc_type=enc_used)
+                        for payload, _n in talk_binary_payload(
+                            adpcm_block, full_block, blocks_per_payload=1
+                        ):
+                            await send_talk_binary(
+                                bc, channel, payload, enc_type=enc_used
+                            )
                 elif msg.type == WSMsgType.ERROR:
                     _LOGGER.warning("Live talk WS error: %s", ws.exception())
                     break
@@ -302,11 +347,16 @@ class ReolinkTalkLiveWebSocketView(HomeAssistantView):
             wall = time.monotonic() - t0
             _LOGGER.info(
                 "Live talk disconnected: camera=%s channel=%s audio=%.2fs wall=%.2fs ratio=%.3f",
-                camera, channel, pcm_bytes_in / 2 / rate, wall,
+                camera,
+                channel,
+                pcm_bytes_in / 2 / rate,
+                wall,
                 (pcm_bytes_in / 2 / rate) / max(wall, 1e-6),
             )
         except Exception as err:
-            _LOGGER.error("Live talk relay error (camera=%s, %s)", camera, type(err).__name__)
+            _LOGGER.error(
+                "Live talk relay error (camera=%s, %s)", camera, type(err).__name__
+            )
             await ws.close(code=4003, message=b"talk relay failed")
         finally:
             if enc_used is not None:
@@ -328,4 +378,6 @@ def async_register_views(hass: HomeAssistant) -> None:
     hass.data[key] = True
     hass.http.register_view(ReolinkTalkLiveWebSocketView())
     websocket_api.async_register_command(hass, ws_get_token)
-    _LOGGER.info("Registered reolink_talk live-talk WebSocket view at /api/reolink_talk/live_ws")
+    _LOGGER.info(
+        "Registered reolink_talk live-talk WebSocket view at /api/reolink_talk/live_ws"
+    )

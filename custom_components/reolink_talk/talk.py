@@ -17,7 +17,9 @@ from homeassistant.helpers.network import get_url
 _LOGGER = logging.getLogger(__name__)
 
 
-BC_MESSAGE_CLASS_1464: Final[bytes] = bytes.fromhex("00001464")  # status_code=0, class=1464
+BC_MESSAGE_CLASS_1464: Final[bytes] = bytes.fromhex(
+    "00001464"
+)  # status_code=0, class=1464
 
 # reolink-aio 0.21.17 removed baichuan.xmls.XML_HEADER, which every talk block
 # was built on (issue #4). Kept here byte-for-byte so we no longer depend on a
@@ -42,6 +44,7 @@ def _first_text(root: ET.Element, path: str) -> str | None:
     if el is None or el.text is None:
         return None
     return el.text.strip()
+
 
 def _all_texts(root: ET.Element, path: str) -> list[str]:
     out: list[str] = []
@@ -76,7 +79,9 @@ def parse_talk_ability(xml: str) -> TalkAbility:
     if "mixAudioStream" in stream_mode_list:
         audio_stream_mode = "mixAudioStream"
     if not audio_stream_mode:
-        audio_stream_mode = stream_mode_list[0] if stream_mode_list else "followVideoStream"
+        audio_stream_mode = (
+            stream_mode_list[0] if stream_mode_list else "followVideoStream"
+        )
 
     ac = ta.find(".//audioConfig")
     if ac is None:
@@ -104,7 +109,11 @@ def parse_talk_ability(xml: str) -> TalkAbility:
 
 def build_talk_config_xml(channel: int, ability: TalkAbility) -> str:
     # Match the XML shapes documented by neolink.
-    prio = f"<priority>{ability.priority}</priority>\n" if ability.priority is not None else ""
+    prio = (
+        f"<priority>{ability.priority}</priority>\n"
+        if ability.priority is not None
+        else ""
+    )
     return (
         '<?xml version="1.0" encoding="UTF-8" ?>\n'
         "<body>\n"
@@ -197,7 +206,7 @@ def bcmedia_adpcm_packet(block: bytes) -> bytes:
         raise ValueError("ADPCM block too small")
     payload_len = len(block) + 4  # + magic u16 + blocksize u16
     # Neolink format: "block size without header, halved" (DVI-4 payload bytes / 2).
-    block_size = ((len(block) - 4) // 2)
+    block_size = (len(block) - 4) // 2
     header = struct.pack(
         "<IHHHH",
         0x62773130,  # MAGIC_HEADER_BCMEDIA_ADPCM
@@ -210,10 +219,15 @@ def bcmedia_adpcm_packet(block: bytes) -> bytes:
     return header + block + (b"\x00" * pad_len)
 
 
-def talk_binary_payload(adpcm_bytes: bytes, full_block_size: int, blocks_per_payload: int = 4) -> list[tuple[bytes, int]]:
+def talk_binary_payload(
+    adpcm_bytes: bytes, full_block_size: int, blocks_per_payload: int = 4
+) -> list[tuple[bytes, int]]:
     # Returns list of (binary_payload, blocks_in_payload).
     out: list[tuple[bytes, int]] = []
-    blocks = [adpcm_bytes[i : i + full_block_size] for i in range(0, len(adpcm_bytes), full_block_size)]
+    blocks = [
+        adpcm_bytes[i : i + full_block_size]
+        for i in range(0, len(adpcm_bytes), full_block_size)
+    ]
     # Drop incomplete trailing block (if any)
     if blocks and len(blocks[-1]) != full_block_size:
         blocks = blocks[:-1]
@@ -311,7 +325,24 @@ async def ffmpeg_to_adpcm_wav(
 
 
 # IMA/DVI ADPCM encoder tables (standard IMA ADPCM).
-_IMA_INDEX_TABLE: Final[list[int]] = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8]
+_IMA_INDEX_TABLE: Final[list[int]] = [
+    -1,
+    -1,
+    -1,
+    -1,
+    2,
+    4,
+    6,
+    8,
+    -1,
+    -1,
+    -1,
+    -1,
+    2,
+    4,
+    6,
+    8,
+]
 _IMA_STEP_TABLE: Final[list[int]] = [
     7,
     8,
@@ -450,7 +481,9 @@ async def ffmpeg_to_pcm_s16le(
     return out
 
 
-def _ima_encode_nibble(sample: int, predictor: int, step_index: int) -> tuple[int, int, int]:
+def _ima_encode_nibble(
+    sample: int, predictor: int, step_index: int
+) -> tuple[int, int, int]:
     """Encode one PCM sample to a 4-bit IMA ADPCM nibble.
 
     Returns (nibble, new_predictor, new_step_index).
@@ -508,7 +541,9 @@ def ima_adpcm_encode_dvi_blocks(pcm_s16le: bytes, *, full_block_size: int) -> by
 
     # Convert pcm bytes to list of i16
     sample_count = len(pcm_s16le) // 2
-    samples = struct.unpack("<" + ("h" * sample_count), pcm_s16le) if sample_count else ()
+    samples = (
+        struct.unpack("<" + ("h" * sample_count), pcm_s16le) if sample_count else ()
+    )
     if not samples:
         return b""
 
@@ -573,7 +608,9 @@ class LiveAdpcmEncoder:
         """Add PCM (s16le, any length) and return every block that is now complete."""
         usable = len(pcm_s16le) - (len(pcm_s16le) % 2)
         if usable:
-            self._pending.extend(struct.unpack("<" + "h" * (usable // 2), pcm_s16le[:usable]))
+            self._pending.extend(
+                struct.unpack("<" + "h" * (usable // 2), pcm_s16le[:usable])
+            )
         blocks: list[bytes] = []
         while True:
             if not self._primed:
@@ -610,7 +647,9 @@ def claim_talk_session(hass, entry_id: str, channel: int):
     active = hass.data.setdefault("reolink_talk", {}).setdefault("active_talk", set())
     key = (entry_id, channel)
     if key in active:
-        raise RuntimeError("Talk already active on this channel; retry after it finishes")
+        raise RuntimeError(
+            "Talk already active on this channel; retry after it finishes"
+        )
     active.add(key)
     try:
         yield
@@ -721,7 +760,6 @@ async def send_talk_binary(
             bc._connection._transport.write(packet)
         return
 
-    full_mess_id = int.from_bytes(int(ch_id).to_bytes(1, "little") + int(bc._mess_id).to_bytes(3, "little"), "little")
     receive_future = loop.create_future()
     proto.receive_futures.setdefault(cmd_id, {})[full_mess_id] = receive_future
 
@@ -783,7 +821,9 @@ async def talk_playback(
             if status != 400:
                 raise
     if enc_used is None:
-        raise RuntimeError(f"Device rejected talk configuration on channel {channel}") from last_err
+        raise RuntimeError(
+            f"Device rejected talk configuration on channel {channel}"
+        ) from last_err
 
     # DVI blocks include a four-byte predictor header. Keep the caller
     # supplied alignment; the PCM path does not produce an ADPCM WAV container.
@@ -809,4 +849,6 @@ async def talk_playback(
         try:
             await bc.send(cmd_id=11, channel=channel, enc_type=enc_used)
         except Exception as err:
-            _LOGGER.warning("Talk stop failed on channel %s (%s)", channel, type(err).__name__)
+            _LOGGER.warning(
+                "Talk stop failed on channel %s (%s)", channel, type(err).__name__
+            )

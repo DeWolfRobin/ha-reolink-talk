@@ -6,7 +6,13 @@ from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers import selector
 
-from .const import CONF_CHANNEL, CONF_REOLINK_ENTRY_IDS, CONF_VERIFY_SSL, DEFAULT_CHANNEL, DOMAIN
+from .const import (
+    CONF_CHANNEL,
+    CONF_REOLINK_ENTRY_IDS,
+    CONF_VERIFY_SSL,
+    DEFAULT_CHANNEL,
+    DOMAIN,
+)
 
 
 class ReolinkTalkConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -54,13 +60,17 @@ class ReolinkTalkOptionsFlowHandler(config_entries.OptionsFlow):
                         mode=selector.SelectSelectorMode.DROPDOWN,
                     )
                 ),
-                vol.Optional(CONF_VERIFY_SSL, default=self._config_entry.options.get(CONF_VERIFY_SSL, True)): bool,
+                vol.Optional(
+                    CONF_VERIFY_SSL,
+                    default=self._config_entry.options.get(CONF_VERIFY_SSL, True),
+                ): bool,
                 vol.Optional(
                     CONF_CHANNEL,
-                    default=self._config_entry.options.get(CONF_CHANNEL, DEFAULT_CHANNEL),
+                    default=self._config_entry.options.get(
+                        CONF_CHANNEL, DEFAULT_CHANNEL
+                    ),
                 ): vol.Coerce(int),
             }
         )
 
         return self.async_show_form(step_id="init", data_schema=schema)
-

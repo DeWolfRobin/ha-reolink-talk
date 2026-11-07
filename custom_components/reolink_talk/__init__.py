@@ -27,12 +27,17 @@ async def _async_register_lovelace_resource(hass: HomeAssistant) -> None:
     contrast, are awaited before dashboards render, so registering there
     removes the race entirely.
     """
-    async with hass.data.setdefault(DOMAIN, {}).setdefault("resource_lock", asyncio.Lock()):
+    async with hass.data.setdefault(DOMAIN, {}).setdefault(
+        "resource_lock", asyncio.Lock()
+    ):
         try:
             lovelace = hass.data.get("lovelace")
             resources = getattr(lovelace, "resources", None)
             if resources is None:
-                _LOGGER.warning("Lovelace resources unavailable; manually add %s as a module resource", FRONTEND_URL)
+                _LOGGER.warning(
+                    "Lovelace resources unavailable; manually add %s as a module resource",
+                    FRONTEND_URL,
+                )
                 return
             if not resources.loaded:
                 await resources.async_load()
@@ -44,14 +49,19 @@ async def _async_register_lovelace_resource(hass: HomeAssistant) -> None:
             if create is None:
                 _LOGGER.warning(
                     "YAML/read-only Lovelace resources: add to configuration.yaml: "
-                    "lovelace: {resources: [{url: '%s', type: module}]}", FRONTEND_URL,
+                    "lovelace: {resources: [{url: '%s', type: module}]}",
+                    FRONTEND_URL,
                 )
                 return
             await create({"res_type": "module", "url": FRONTEND_URL})
             _LOGGER.info("Registered Lovelace resource %s", FRONTEND_URL)
         except Exception as err:
             # Frontend enhancement must never prevent media players loading.
-            _LOGGER.warning("Cannot register Lovelace resource (%s); manually add %s as a module resource", type(err).__name__, FRONTEND_URL)
+            _LOGGER.warning(
+                "Cannot register Lovelace resource (%s); manually add %s as a module resource",
+                type(err).__name__,
+                FRONTEND_URL,
+            )
 
 
 async def _async_register_frontend(hass: HomeAssistant) -> None:
@@ -87,7 +97,9 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Default options: all current Reolink config entries, channel 0.
     if not entry.options:
-        reolink_entry_ids = [e.entry_id for e in hass.config_entries.async_entries("reolink")]
+        reolink_entry_ids = [
+            e.entry_id for e in hass.config_entries.async_entries("reolink")
+        ]
         hass.config_entries.async_update_entry(
             entry,
             options={
