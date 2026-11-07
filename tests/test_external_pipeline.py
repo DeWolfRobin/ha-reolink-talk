@@ -12,10 +12,59 @@ import tempfile
 import unittest
 import wave
 from unittest.mock import patch
-from test_live_adpcm import talk, sine
+from test_live_adpcm import talk, sine, snr_db
 
 
 class FFmpegTests(unittest.IsolatedAsyncioTestCase):
+    async def test_adpcm_against_independent_ffmpeg_decoder(self):
+        binary = shutil.which("ffmpeg")
+        if not binary and importlib.util.find_spec("imageio_ffmpeg"):
+            import imageio_ffmpeg
+
+            binary = imageio_ffmpeg.get_ffmpeg_exe()
+        if not binary:
+            self.skipTest("install FFmpeg or imageio-ffmpeg")
+        block_size = 516
+        samples_per_block = 1025
+        samples = sine(samples_per_block * 80)
+        encoded = talk.ima_adpcm_encode_dvi_blocks(
+            struct.pack(f"<{len(samples)}h", *samples), full_block_size=block_size
+        )
+        # Wrap the identical mono IMA block layout in WAV for an independent
+        # decoder, rather than trusting our own predictor/header interpretation.
+        fmt = struct.pack(
+            "<HHIIHHHH",
+            17,
+            1,
+            16000,
+            16000 * block_size // samples_per_block,
+            block_size,
+            4,
+            2,
+            samples_per_block,
+        )
+        body = (
+            b"WAVEfmt "
+            + struct.pack("<I", len(fmt))
+            + fmt
+            + b"data"
+            + struct.pack("<I", len(encoded))
+            + encoded
+        )
+        wav = b"RIFF" + struct.pack("<I", len(body)) + body
+        with patch.object(talk.shutil, "which", return_value=binary):
+            decoded = await talk.ffmpeg_to_pcm_s16le(wav, sample_rate=16000)
+        output = struct.unpack(f"<{len(decoded) // 2}h", decoded)
+        self.assertEqual(len(output), len(samples))
+        self.assertGreater(snr_db(samples, output), 25)
+        # Every header must be the corresponding INPUT sample, not the previous
+        # block's final decoded sample.
+        for index in range(80):
+            self.assertEqual(
+                struct.unpack_from("<h", encoded, index * block_size)[0],
+                samples[index * samples_per_block],
+            )
+
     async def test_stereo_48khz_to_mono_16khz_and_mute(self):
         binary = shutil.which("ffmpeg")
         if not binary and importlib.util.find_spec("imageio_ffmpeg"):

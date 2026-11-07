@@ -536,62 +536,22 @@ def ima_adpcm_encode_dvi_blocks(pcm_s16le: bytes, *, full_block_size: int) -> by
     if len(pcm_s16le) % 2 != 0:
         raise ValueError("PCM length must be even (s16le)")
 
-    payload_bytes = full_block_size - 4
-    payload_samples = payload_bytes * 2
-
-    # Convert pcm bytes to list of i16
-    sample_count = len(pcm_s16le) // 2
-    samples = (
-        struct.unpack("<" + ("h" * sample_count), pcm_s16le) if sample_count else ()
-    )
-    if not samples:
+    if not pcm_s16le:
         return b""
-
-    # Streaming-style: each block header contains the current predictor + index
-    # (the "last output" state), followed by payload_samples ADPCM-coded samples.
-    predictor = int(samples[0])
-    step_index = 0
-    pos = 1  # first sample is used as initial predictor
-
-    out = bytearray()
-    while pos <= len(samples):
-        block = bytearray()
-        block += struct.pack("<hBB", predictor, step_index, 0)
-
-        nibble_acc = None
-        # Encode a fixed number of samples per block.
-        for _ in range(payload_samples):
-            s = int(samples[pos]) if pos < len(samples) else 0
-            pos += 1
-            nib, predictor, step_index = _ima_encode_nibble(s, predictor, step_index)
-            if nibble_acc is None:
-                nibble_acc = nib
-            else:
-                block.append((nibble_acc & 0xF) | ((nib & 0xF) << 4))
-                nibble_acc = None
-        if nibble_acc is not None:
-            block.append(nibble_acc & 0xF)
-
-        if len(block) < full_block_size:
-            block.extend(b"\x00" * (full_block_size - len(block)))
-        out += block[:full_block_size]
-
-        # Stop once we've consumed all input samples and emitted at least one block.
-        if pos >= len(samples):
-            break
-
-    return bytes(out)
+    encoder = LiveAdpcmEncoder(full_block_size)
+    samples_per_block = (full_block_size - 4) * 2 + 1
+    # Pad only the final incomplete block. Every header represents a real
+    # input sample, followed by two coded samples per payload byte.
+    block_pcm_bytes = samples_per_block * 2
+    padded = pcm_s16le + bytes((-len(pcm_s16le)) % block_pcm_bytes)
+    return b"".join(encoder.feed(padded))
 
 
 class LiveAdpcmEncoder:
-    """Streaming DVI-4 encoder that carries predictor and step index across blocks.
+    """Encode IMA/DVI blocks with one input sample in every block header.
 
-    ima_adpcm_encode_dvi_blocks() restarts from step_index 0 and spends one
-    input sample as the header predictor on every call. Called once per block
-    (as the live relay does) that resets the codec every few hundred
-    milliseconds. Here only the very first block consumes a sample as the
-    initial predictor; every later block header carries the running state, so
-    the camera's decoder stays in step with the encoder for the whole hold.
+    Match GStreamer's adpcmenc DVI layout: carry the adaptive step index
+    between blocks, but seed each predictor with that block's first sample.
     """
 
     def __init__(self, full_block_size: int) -> None:
@@ -599,44 +559,38 @@ class LiveAdpcmEncoder:
             raise ValueError("full_block_size too small")
         self.full_block_size = full_block_size
         self.payload_samples = (full_block_size - 4) * 2
+        self.samples_per_block = self.payload_samples + 1
         self._predictor = 0
         self._step_index = 0
-        self._primed = False
         self._pending: list[int] = []
+        self._partial_byte = b""
 
     def feed(self, pcm_s16le: bytes) -> list[bytes]:
-        """Add PCM (s16le, any length) and return every block that is now complete."""
-        usable = len(pcm_s16le) - (len(pcm_s16le) % 2)
+        """Accept arbitrary byte chunks without dropping split PCM samples."""
+        pcm_s16le = self._partial_byte + pcm_s16le
+        usable = len(pcm_s16le) - len(pcm_s16le) % 2
+        self._partial_byte = pcm_s16le[usable:]
         if usable:
-            self._pending.extend(
-                struct.unpack("<" + "h" * (usable // 2), pcm_s16le[:usable])
-            )
+            self._pending.extend(struct.unpack(f"<{usable // 2}h", pcm_s16le[:usable]))
         blocks: list[bytes] = []
-        while True:
-            if not self._primed:
-                if len(self._pending) < self.payload_samples + 1:
-                    break
-                self._predictor = self._pending.pop(0)
-                self._step_index = 0
-                self._primed = True
-            if len(self._pending) < self.payload_samples:
-                break
-            samples = self._pending[: self.payload_samples]
-            del self._pending[: self.payload_samples]
-            blocks.append(self._encode_block(samples))
+        while len(self._pending) >= self.samples_per_block:
+            samples = self._pending[: self.samples_per_block]
+            del self._pending[: self.samples_per_block]
+            self._predictor = samples[0]
+            blocks.append(self._encode_block(samples[1:]))
         return blocks
 
     def _encode_block(self, samples: list[int]) -> bytes:
         block = bytearray(struct.pack("<hBB", self._predictor, self._step_index, 0))
         acc = None
-        for s in samples:
+        for sample in samples:
             nib, self._predictor, self._step_index = _ima_encode_nibble(
-                s, self._predictor, self._step_index
+                sample, self._predictor, self._step_index
             )
             if acc is None:
                 acc = nib
             else:
-                block.append((acc & 0xF) | ((nib & 0xF) << 4))
+                block.append(acc | (nib << 4))
                 acc = None
         return bytes(block)
 

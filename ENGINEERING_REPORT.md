@@ -68,9 +68,10 @@ blocks are sent per payload, then paced against a monotonic playback deadline.
 File ADPCM encoding runs in the HA executor to avoid blocking concurrent players
 and the event loop. Stop is issued in finally after a successfully configured stream; logout follows.
 No evidence justifies changing ADPCM layout, gain, or sample-rate negotiation yet.
-The existing live codec tests use a decoder that treats headers as state, not output
-samples; camera interpretation of the header and the legacy +1 sample pacing term
-still need hardware confirmation. They were intentionally not changed speculatively.
+The follow-up investigation below supersedes the initial codec assessment: an
+independent decoder exposed incorrect header-sample handling that the original
+self-consistent tests missed. The +1 sample pacing term is consistent with the
+reference encoder and is retained.
 
 ## Validation
 
@@ -200,3 +201,43 @@ and start it again. Keep the backup path from the commands above.
 
 These sources and installed reolink-aio were used to inspect API behavior; the
 moving dev branches do not substitute for testing against the deployed HA version.
+
+
+## Follow-up: persistent crackling with PCM16 / 16 kHz / mono WAV
+
+A matching source WAV still undergoes ADPCM encoding; its PCM format does not
+bypass the defective stage. Comparison with GStreamer adpcmenc (used by Neolink)
+showed that each block header must contain that block's first input sample, and
+only the adaptive step index is carried from the preceding block. Our encoder
+instead wrote the preceding decoded predictor into every subsequent header and
+consumed one fewer input sample per block. A decoder that emits the header sample
+therefore repeats a sample at every boundary. With a 516-byte block and 16 kHz
+rate, boundaries occur about 15.6 times per second. This can produce periodic
+roughness/clicks; whether it explains all physical speaker distortion is unverified.
+
+An independent FFmpeg IMA decoder reproduced the problem before the change.
+For the same 80,000-sample, 440 Hz, amplitude-12,000 signal at 16 kHz, SNR improved
+from -2.74 dB to 35.74 dB after correcting the encoder. The final padded block is
+excluded from SNR in both cases. Byte order, nibble order and BcMedia framing
+were unchanged; framing matches Neolink's serializer.
+
+The file and live paths now share the corrected encoder. File encoding pads only
+the final block. Live encoding also preserves a PCM sample split between odd-sized
+byte chunks. The earlier reference decoder was wrong in the same way as the
+encoder: it never emitted the header sample, hiding the defect. It is corrected,
+and independent FFmpeg decoding now checks duration, SNR and every header against
+the original input sample. Exact-block, empty, partial-final-block and odd-byte
+streaming tests are included. Full suite: 23 passed, no skips; compileall, Ruff F
+checks and formatting checks on the changed files pass.
+
+Reference inspected:
+https://github.com/GStreamer/gst-plugins-bad/blob/master/gst/adpcmenc/adpcmenc.c
+(adpcmenc_setup and adpcmenc_encode_ima_block).
+
+Deploy the updated integration using the Docker steps above and restart HA.
+Replay the same WAV at the same volume on each camera. A sustained moderate-volume
+440 Hz tone should no longer have block-periodic artifacts from this defect.
+If crackling remains, supply the actual WAV and the negotiated TalkAbility/debug
+encoding line; compare a lower speaker volume as a separate amplifier/clipping
+test. Source bit depth and sample rate alone cannot establish absence of clipping.
+No physical NVR/camera test was performed here.

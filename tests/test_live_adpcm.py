@@ -3,6 +3,7 @@
 talk.py imports Home Assistant at module level, so stub just enough of it to
 load the pure encoder code without a Home Assistant install.
 """
+
 import importlib.util
 import math
 import pathlib
@@ -11,8 +12,13 @@ import sys
 import types
 import unittest
 
-for name in ("homeassistant", "homeassistant.core", "homeassistant.helpers",
-             "homeassistant.helpers.aiohttp_client", "homeassistant.helpers.network"):
+for name in (
+    "homeassistant",
+    "homeassistant.core",
+    "homeassistant.helpers",
+    "homeassistant.helpers.aiohttp_client",
+    "homeassistant.helpers.network",
+):
     sys.modules.setdefault(name, types.ModuleType(name))
 sys.modules["homeassistant.core"].HomeAssistant = object
 sys.modules["homeassistant.helpers.aiohttp_client"].async_get_clientsession = None
@@ -32,13 +38,17 @@ def decode(blocks):
     out = []
     for b in blocks:
         predictor, idx, _ = struct.unpack("<hBB", b[:4])
+        out.append(predictor)  # header is the first output sample of EACH block
         for byte in b[4:]:
             for nib in (byte & 0xF, byte >> 4):
                 step = talk._IMA_STEP_TABLE[idx]
                 vpdiff = step >> 3
-                if nib & 4: vpdiff += step
-                if nib & 2: vpdiff += step >> 1
-                if nib & 1: vpdiff += step >> 2
+                if nib & 4:
+                    vpdiff += step
+                if nib & 2:
+                    vpdiff += step >> 1
+                if nib & 1:
+                    vpdiff += step >> 2
                 predictor += -vpdiff if nib & 8 else vpdiff
                 predictor = max(-32768, min(32767, predictor))
                 idx = max(0, min(88, idx + talk._IMA_INDEX_TABLE[nib]))
@@ -61,7 +71,11 @@ class LiveEncoderTest(unittest.TestCase):
         enc = talk.LiveAdpcmEncoder(BLOCK)
         blocks = []
         for i in range(0, len(pcm), chunk_samples):
-            blocks += enc.feed(struct.pack(f"<{len(pcm[i:i+chunk_samples])}h", *pcm[i:i+chunk_samples]))
+            blocks += enc.feed(
+                struct.pack(
+                    f"<{len(pcm[i : i + chunk_samples])}h", *pcm[i : i + chunk_samples]
+                )
+            )
         return blocks
 
     def test_long_hold_stays_accurate(self):
@@ -70,8 +84,7 @@ class LiveEncoderTest(unittest.TestCase):
         got = decode(blocks)
         # Compare the last 5 s: a codec that drifted would be far off by now.
         tail = slice(len(got) - 16000 * 5, len(got))
-        offset = 1  # first sample seeds the predictor and is not emitted
-        self.assertGreater(snr_db(pcm[offset:][tail], got[tail]), 15)
+        self.assertGreater(snr_db(pcm[tail], got[tail]), 15)
 
     def test_chunking_does_not_change_output(self):
         pcm = sine(16000 * 2)
@@ -83,6 +96,27 @@ class LiveEncoderTest(unittest.TestCase):
         blocks = self.encode_stream(sine(16000), 4096)
         # With reset-per-block encoding every header step index would be 0.
         self.assertTrue(any(b[2] != 0 for b in blocks[1:]))
+
+    def test_byte_chunks_preserve_split_samples(self):
+        samples = sine(513 * 10)
+        pcm = struct.pack(f"<{len(samples)}h", *samples)
+        encoder = talk.LiveAdpcmEncoder(BLOCK)
+        blocks = []
+        for offset in range(0, len(pcm), 333):
+            blocks.extend(encoder.feed(pcm[offset : offset + 333]))
+        self.assertEqual(
+            b"".join(blocks),
+            talk.ima_adpcm_encode_dvi_blocks(pcm, full_block_size=BLOCK),
+        )
+        self.assertEqual(len(decode(blocks)), len(samples))
+
+    def test_file_padding_only_at_final_block(self):
+        for count in (0, 1, 512, 513, 514, 1026):
+            samples = sine(count)
+            encoded = talk.ima_adpcm_encode_dvi_blocks(
+                struct.pack(f"<{count}h", *samples), full_block_size=BLOCK
+            )
+            self.assertEqual(len(encoded), math.ceil(count / 513) * BLOCK)
 
     def test_old_per_block_call_resets_state(self):
         """Documents the defect: one call per block always restarts at index 0."""

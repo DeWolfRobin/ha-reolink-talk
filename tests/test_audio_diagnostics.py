@@ -34,12 +34,12 @@ class WaveformTests(TestCase):
                     struct.pack(f"<{count}h", *samples), full_block_size=260
                 )
                 blocks = [data[i : i + 260] for i in range(0, len(data), 260)]
-                output = decode(blocks)[: count - 1]
-                self.assertEqual(len(output), count - 1)
+                output = decode(blocks)[:count]
+                self.assertEqual(len(output), count)
                 if name == "silence":
                     self.assertEqual(set(output), {0})
                 elif name != "transient":
-                    self.assertGreater(snr_db(samples[1:], output), 15)
+                    self.assertGreater(snr_db(samples, output), 15)
                 self.assertEqual(
                     len(talk.talk_binary_payload(data, 260)), math.ceil(len(blocks) / 4)
                 )
