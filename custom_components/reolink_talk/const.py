@@ -5,3 +5,5 @@ CONF_CHANNEL = "channel"
 
 DEFAULT_CHANNEL = 0
 
+
+CONF_VERIFY_SSL = "verify_ssl"

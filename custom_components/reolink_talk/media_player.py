@@ -8,14 +8,13 @@ from dataclasses import dataclass
 from homeassistant.components.media_player import MediaPlayerEntity
 from homeassistant.components.media_player.const import (
     MediaPlayerEntityFeature,
-    MediaType,
     MediaPlayerState,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_CHANNEL, CONF_REOLINK_ENTRY_IDS, DEFAULT_CHANNEL, DOMAIN
+from .const import CONF_CHANNEL, CONF_REOLINK_ENTRY_IDS, CONF_VERIFY_SSL, DEFAULT_CHANNEL, DOMAIN
 from .talk import ffmpeg_to_pcm_s16le, fetch_bytes, ima_adpcm_encode_dvi_blocks, parse_talk_ability, talk_playback
 
 _LOGGER = logging.getLogger(__name__)
@@ -31,6 +30,7 @@ class ReolinkTarget:
     password: str
     title: str
     channel: int
+    verify_ssl: bool = True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -56,6 +56,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
                 port=int(data.get("baichuan_port", 9000)),
                 username=data["username"],
                 password=data["password"],
+                verify_ssl=entry.options.get(CONF_VERIFY_SSL, True),
             )
         except KeyError:
             continue
@@ -69,7 +70,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
                 port=base_kwargs["http_port"],
                 use_https=base_kwargs["use_https"],
                 bc_port=base_kwargs["port"],
-                aiohttp_get_session_callback=lambda: async_get_clientsession(hass),
+                aiohttp_get_session_callback=lambda: async_get_clientsession(hass, verify_ssl=entry.options.get(CONF_VERIFY_SSL, True)),
             )
             await probe_host.get_host_data()
             for ch in probe_host.channels:
@@ -166,7 +167,7 @@ class ReolinkTalkPlayer(MediaPlayerEntity):
                 port=self._target.http_port,
                 use_https=self._target.use_https,
                 bc_port=self._target.port,
-                aiohttp_get_session_callback=lambda: async_get_clientsession(self.hass),
+                aiohttp_get_session_callback=lambda: async_get_clientsession(self.hass, verify_ssl=self._target.verify_ssl),
             )
             try:
                 await host.login()
@@ -186,8 +187,6 @@ class ReolinkTalkPlayer(MediaPlayerEntity):
 
     async def async_play_media(self, media_type: str, media_id: str, **kwargs) -> None:
         # Resolve HA media-source URLs if needed.
-        from homeassistant.components.media_player import async_process_play_media_url
-        from homeassistant.components.media_source import async_resolve_media
 
         async with self._lock:
             try:
@@ -196,7 +195,7 @@ class ReolinkTalkPlayer(MediaPlayerEntity):
                 media_bytes = await self._resolve_media_bytes(media_type, media_id)
                 await self._play_bytes(media_bytes)
             except Exception:
-                _LOGGER.exception("play_media failed for %s (media_id=%s)", self.entity_id, media_id)
+                _LOGGER.error("play_media failed for %s", self.entity_id)
                 raise
             finally:
                 self._attr_state = MediaPlayerState.IDLE
@@ -275,7 +274,7 @@ class ReolinkTalkPlayer(MediaPlayerEntity):
             port=self._target.http_port,
             use_https=self._target.use_https,
             bc_port=self._target.port,
-            aiohttp_get_session_callback=lambda: async_get_clientsession(self.hass),
+            aiohttp_get_session_callback=lambda: async_get_clientsession(self.hass, verify_ssl=self._target.verify_ssl),
         )
         bc = host.baichuan
 
@@ -322,7 +321,7 @@ class ReolinkTalkPlayer(MediaPlayerEntity):
             port=self._target.http_port,
             use_https=self._target.use_https,
             bc_port=self._target.port,
-            aiohttp_get_session_callback=lambda: async_get_clientsession(self.hass),
+            aiohttp_get_session_callback=lambda: async_get_clientsession(self.hass, verify_ssl=self._target.verify_ssl),
         )
         bc = host.baichuan
         try:
