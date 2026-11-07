@@ -5,6 +5,7 @@ import logging
 import shutil
 import struct
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Final
 from urllib.parse import urlparse
@@ -603,6 +604,20 @@ class LiveAdpcmEncoder:
         return bytes(block)
 
 
+@contextmanager
+def claim_talk_session(hass, entry_id: str, channel: int):
+    """Reject overlapping talk on one channel, allowing different channels."""
+    active = hass.data.setdefault("reolink_talk", {}).setdefault("active_talk", set())
+    key = (entry_id, channel)
+    if key in active:
+        raise RuntimeError("Talk already active on this channel; retry after it finishes")
+    active.add(key)
+    try:
+        yield
+    finally:
+        active.discard(key)
+
+
 async def send_talk_binary(
     bc,  # reolink_aio.baichuan.Baichuan
     channel: int,
@@ -690,9 +705,15 @@ async def send_talk_binary(
             payload_offset,
         )
 
-    # Wait for the camera ack like neolink does (it subscribes to MSG_ID_TALK and awaits recv).
-    # Without this, some firmwares may silently drop packets under load.
+    # Modern reolink-aio owns response routing and UDP/TCP transport details.
+    # Its connection.send propagates rejected packets and cleans pending futures.
     await bc._connect_if_needed()
+    full_mess_id = int.from_bytes(header[12:16], "little")
+    sender = getattr(bc._connection, "send", None)
+    if sender is not None:
+        await sender(packet, cmd_id, full_mess_id, channel)
+        return
+    # Compatibility with older reolink-aio's protocol-owned response routing.
     proto = getattr(bc, "_protocol", None)
     loop = getattr(bc, "_loop", None)
     if proto is None or loop is None:
@@ -745,71 +766,24 @@ async def talk_playback(
                 raise
         return bc_util.EncType.BC
 
-    async def _stop_talk_best_effort(enc: bc_util.EncType) -> None:
+    enc_used = None
+    last_err = None
+    for talk_cfg in build_talk_config_variants(channel, ability):
         try:
-            await bc.send(cmd_id=11, channel=channel, enc_type=enc)
-            await asyncio.sleep(0.1)
-        except Exception:
-            pass
-
-    # Send TalkConfig first (cmd 201). If we get 422, stop talk and retry.
-    try:
-        last_err: Exception | None = None
-        enc_used = bc_util.EncType.AES
-        for talk_cfg in build_talk_config_variants(channel, ability):
-            try:
-                enc_used = await _send_with_fallback(201, body=talk_cfg)
-                last_err = None
-                break
-            except ApiError as err:
-                last_err = err
-                rsp = getattr(err, "rspCode", None)
-                if rsp in (400, 422):
-                    # Many firmwares require stopping an existing talk session first.
-                    await _stop_talk_best_effort(bc_util.EncType.AES)
-                    await _stop_talk_best_effort(bc_util.EncType.BC)
-                    continue
+            enc_used = await _send_with_fallback(201, body=talk_cfg)
+            break
+        except ApiError as err:
+            last_err = err
+            status = getattr(err, "rspCode", None)
+            if status in (421, 422):
+                raise RuntimeError(
+                    f"Device rejected talk on channel {channel} (status {status}); "
+                    "another talk stream may be active. Retry sequentially or use direct camera connections."
+                ) from err
+            if status != 400:
                 raise
-        if last_err is not None:
-            _LOGGER.error(
-                "TalkConfig rejected for ch=%s sample_rate=%s length_per_encoder=%s audio_type=%s (rspCode=%s)",
-                channel,
-                ability.sample_rate,
-                ability.length_per_encoder,
-                ability.audio_type,
-                getattr(last_err, "rspCode", None),
-            )
-            raise last_err
-    except ApiError as err:
-        if getattr(err, "rspCode", None) == 422:
-            # Stop talk and retry. Use the same AES->BC fallback logic.
-            await _send_with_fallback(11)
-            last_err = None
-            for talk_cfg in build_talk_config_variants(channel, ability):
-                try:
-                    enc_used = await _send_with_fallback(201, body=talk_cfg)
-                    last_err = None
-                    break
-                except ApiError as err2:
-                    last_err = err2
-                    rsp = getattr(err2, "rspCode", None)
-                    if rsp in (400, 422):
-                        await _stop_talk_best_effort(bc_util.EncType.AES)
-                        await _stop_talk_best_effort(bc_util.EncType.BC)
-                        continue
-                    raise
-            if last_err is not None:
-                _LOGGER.error(
-                    "TalkConfig rejected after stop/retry for ch=%s sample_rate=%s length_per_encoder=%s audio_type=%s (rspCode=%s)",
-                    channel,
-                    ability.sample_rate,
-                    ability.length_per_encoder,
-                    ability.audio_type,
-                    getattr(last_err, "rspCode", None),
-                )
-                raise last_err
-        else:
-            raise
+    if enc_used is None:
+        raise RuntimeError(f"Device rejected talk configuration on channel {channel}") from last_err
 
     # DVI blocks include a four-byte predictor header. Keep the caller
     # supplied alignment; the PCM path does not produce an ADPCM WAV container.
@@ -834,6 +808,5 @@ async def talk_playback(
     finally:
         try:
             await bc.send(cmd_id=11, channel=channel, enc_type=enc_used)
-        except Exception:
-            # Best-effort stop; do not mask the primary exception.
-            pass
+        except Exception as err:
+            _LOGGER.warning("Talk stop failed on channel %s (%s)", channel, type(err).__name__)

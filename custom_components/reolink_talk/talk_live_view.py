@@ -21,7 +21,6 @@ opening the audio socket. An unauthenticated caller has no way to obtain one.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import secrets
 import time
@@ -38,6 +37,7 @@ from homeassistant.util import slugify
 from .const import DOMAIN
 from .talk import (
     LiveAdpcmEncoder,
+    claim_talk_session,
     build_talk_config_variants,
     parse_talk_ability,
     send_talk_binary,
@@ -199,6 +199,14 @@ class ReolinkTalkLiveWebSocketView(HomeAssistantView):
             return ws
         entry, channel = resolved
 
+        try:
+            with claim_talk_session(hass, entry.entry_id, channel):
+                return await self._relay(hass, ws, camera, entry, channel)
+        except RuntimeError:
+            await ws.close(code=4003, message=b"talk channel busy or rejected")
+            return ws
+
+    async def _relay(self, hass, ws, camera, entry, channel):
         _LOGGER.info("Live talk connected: camera=%s channel=%s", camera, channel)
 
         from reolink_aio.baichuan import util as bc_util
@@ -246,16 +254,10 @@ class ReolinkTalkLiveWebSocketView(HomeAssistantView):
                     except ApiError as err:
                         last_err = err
                         rsp = getattr(err, "rspCode", None)
-                        if rsp in (400, 421, 422):
-                            try:
-                                await bc.send(cmd_id=11, channel=channel, enc_type=enc)
-                                await asyncio.sleep(0.1)
-                                await bc.send(cmd_id=201, channel=channel, body=cfg_xml, enc_type=enc)
-                                enc_used = enc
-                                last_err = None
-                                break
-                            except Exception:
-                                pass
+                        if rsp in (421, 422):
+                            _LOGGER.warning("Device busy/rejected talk on channel %s (status %s)", channel, rsp)
+                            await ws.close(code=4003, message=b"device busy; try sequential playback")
+                            return ws
                         continue
                 if enc_used is not None:
                     break
@@ -303,14 +305,15 @@ class ReolinkTalkLiveWebSocketView(HomeAssistantView):
                 camera, channel, pcm_bytes_in / 2 / rate, wall,
                 (pcm_bytes_in / 2 / rate) / max(wall, 1e-6),
             )
-        except Exception:
-            _LOGGER.exception("Live talk relay error (camera=%s)", camera)
+        except Exception as err:
+            _LOGGER.error("Live talk relay error (camera=%s, %s)", camera, type(err).__name__)
+            await ws.close(code=4003, message=b"talk relay failed")
         finally:
             if enc_used is not None:
                 try:
                     await bc.send(cmd_id=11, channel=channel, enc_type=enc_used)
                 except Exception as e:
-                    _LOGGER.warning("cmd11 stop failed (ignored): %s", e)
+                    _LOGGER.warning("Talk stop failed (%s)", type(e).__name__)
             # Do NOT logout/close bc here -- this connection is owned by the
             # core Reolink integration, we only borrowed it.
 

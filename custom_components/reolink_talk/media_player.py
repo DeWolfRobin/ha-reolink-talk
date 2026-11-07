@@ -15,7 +15,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import CONF_CHANNEL, CONF_REOLINK_ENTRY_IDS, CONF_VERIFY_SSL, DEFAULT_CHANNEL, DOMAIN
-from .talk import ffmpeg_to_pcm_s16le, fetch_bytes, ima_adpcm_encode_dvi_blocks, parse_talk_ability, talk_playback
+from .talk import claim_talk_session, ffmpeg_to_pcm_s16le, fetch_bytes, ima_adpcm_encode_dvi_blocks, parse_talk_ability, talk_playback
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -124,6 +124,7 @@ class ReolinkTalkPlayer(MediaPlayerEntity):
         self._attr_unique_id = f"{DOMAIN}:{reolink_entry_id}:{target.channel}"
         self._attr_volume_level = 1.0
         self._lock = asyncio.Lock()
+        self._playback_tasks: set[asyncio.Task] = set()
         self._last_ability = None
 
     async def async_added_to_hass(self) -> None:
@@ -182,24 +183,38 @@ class ReolinkTalkPlayer(MediaPlayerEntity):
             finally:
                 try:
                     await host.logout()
-                except Exception:  # best-effort
-                    pass
+                except Exception as err:
+                    _LOGGER.debug("Device logout failed (%s)", type(err).__name__)
 
     async def async_play_media(self, media_type: str, media_id: str, **kwargs) -> None:
-        # Resolve HA media-source URLs if needed.
+        task = asyncio.current_task()
+        self._playback_tasks.add(task)
+        try:
+            async with self._lock:
+                with claim_talk_session(self.hass, self._reolink_entry_id, self._target.channel):
+                    await self._async_play_media(media_type, media_id)
+        finally:
+            self._playback_tasks.discard(task)
 
-        async with self._lock:
-            try:
-                self._attr_state = MediaPlayerState.PLAYING
-                self.async_write_ha_state()
-                media_bytes = await self._resolve_media_bytes(media_type, media_id)
-                await self._play_bytes(media_bytes)
-            except Exception:
-                _LOGGER.error("play_media failed for %s", self.entity_id)
-                raise
-            finally:
-                self._attr_state = MediaPlayerState.IDLE
-                self.async_write_ha_state()
+    async def async_will_remove_from_hass(self) -> None:
+        tasks = list(self._playback_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _async_play_media(self, media_type: str, media_id: str) -> None:
+        try:
+            self._attr_state = MediaPlayerState.PLAYING
+            self.async_write_ha_state()
+            media_bytes = await self._resolve_media_bytes(media_type, media_id)
+            await self._play_bytes(media_bytes)
+        except Exception as err:
+            _LOGGER.error("play_media failed for %s (%s)", self.entity_id, type(err).__name__)
+            raise
+        finally:
+            self._attr_state = MediaPlayerState.IDLE
+            self.async_write_ha_state()
 
     async def _resolve_media_bytes(self, media_type: str, media_id: str) -> bytes:
         """Return media bytes for play_media.
@@ -304,8 +319,8 @@ class ReolinkTalkPlayer(MediaPlayerEntity):
         finally:
             try:
                 await host.logout()
-            except Exception:  # best-effort
-                pass
+            except Exception as err:
+                _LOGGER.debug("Device logout failed (%s)", type(err).__name__)
 
     async def _probe_ability(self, *, timeout_s: float = 5.0):
         from homeassistant.helpers.aiohttp_client import async_get_clientsession
